@@ -32,7 +32,7 @@ It scans websites for common security issues and generates a structured HTML rep
 ### 1. Clone repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/webv.git
+git clone https://github.com/go3-14/webv.git
 cd webv
 ```
 
