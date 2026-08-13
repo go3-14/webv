@@ -7,49 +7,13 @@ import time
 import random
 import json
 import argparse
+import logging
+import shutil
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 
 PAYLOAD_FILE = "payloads.json"
-
-import shutil
-
-def check_dependencies():
-    missing = []
-
-    if not shutil.which("nmap"):
-        missing.append("nmap")
-
-    if not shutil.which("nikto"):
-        missing.append("nikto")
-
-    if missing:
-        print("\n[!] Missing tools:")
-        for m in missing:
-            print(f" - {m}")
-
-        print("\nInstall using:")
-        print("sudo apt install " + " ".join(missing))
-        return False
-
-    return True
-
-# -----------------------------
-# Banner
-# -----------------------------
-def print_banner():
-    banner = r"""
-██╗    ██╗███████╗██████╗ ██╗   ██╗
-██║    ██║██╔════╝██╔══██╗██║   ██║
-██║ █╗ ██║█████╗  ██████╔╝██║   ██║
-██║███╗██║██╔══╝  ██╔══██╗██║   ██║
-╚███╔███╔╝███████╗██████╔╝╚██████╔╝
- ╚══╝╚══╝ ╚══════╝╚═════╝  ╚═════╝
-
-   Web Vulnerability Scanner (webv)
-"""
-    print(banner)
 
 
 # -----------------------------
@@ -59,13 +23,20 @@ def load_payloads():
     try:
         with open(PAYLOAD_FILE, "r") as f:
             return json.load(f)
-    except:
+    except FileNotFoundError:
+        print(f"[!] Payload file '{PAYLOAD_FILE}' not found. Using defaults.")
+        return {"xss": ["<script>alert(1)</script>"], "sqli": ["'"]}
+    except json.JSONDecodeError as e:
+        print(f"[!] Payload file is malformed JSON: {e}. Using defaults.")
         return {"xss": ["<script>alert(1)</script>"], "sqli": ["'"]}
 
 
 def save_payloads(data):
-    with open(PAYLOAD_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open(PAYLOAD_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except OSError as e:
+        print(f"[!] Could not save payloads: {e}")
 
 
 # -----------------------------
@@ -103,15 +74,66 @@ VULN_INFO = {
 # -----------------------------
 # Helpers
 # -----------------------------
+def check_dependencies():
+    missing = []
+    if not shutil.which("nmap"):
+        missing.append("nmap")
+    if not shutil.which("nikto"):
+        missing.append("nikto")
+    if missing:
+        print("\n[!] Missing tools:")
+        for m in missing:
+            print(f" - {m}")
+        print("\nInstall using:")
+        print("sudo apt install " + " ".join(missing))
+        return False
+    return True
+
+
 def extract_host(url):
     return urlparse(url).netloc
 
 
 def validate_url(url):
-    try:
-        return requests.get(url, timeout=5)
-    except:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        print(f"[-] Invalid URL scheme '{parsed.scheme}'. Use http:// or https://")
         return None
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response
+    except requests.exceptions.Timeout:
+        print(f"[-] Connection timed out reaching: {url}")
+        return None
+    except requests.exceptions.ConnectionError:
+        print(f"[-] Cannot connect to: {url}")
+        return None
+    except requests.exceptions.HTTPError as e:
+        print(f"[!] HTTP {e.response.status_code} received from {url} — continuing scan.")
+        return e.response
+    except requests.exceptions.RequestException as e:
+        print(f"[-] Request failed: {e}")
+        return None
+
+
+# -----------------------------
+# Banner
+# -----------------------------
+def print_banner():
+    banner = r"""
+██╗    ██╗███████╗██████╗ ██╗   ██╗
+██║    ██║██╔════╝██╔══██╗██║   ██║
+██║ █╗ ██║█████╗  ██████╔╝██║   ██║
+██║███╗██║██╔══╝  ██╔══██╗██║   ██║
+╚███╔███╔╝███████╗██████╔╝╚██████╔╝
+ ╚══╝╚══╝ ╚══════╝╚═════╝  ╚═════╝
+
+   Web Vulnerability Scanner (webv)
+"""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    print(banner)
 
 
 # -----------------------------
@@ -127,7 +149,6 @@ def check_headers(response):
 
 def check_xss(url):
     payloads = load_payloads()["xss"]
-
     for payload in payloads:
         try:
             res = requests.get(f"{url}?q={payload}")
@@ -137,14 +158,13 @@ def check_xss(url):
                     "severity": "High",
                     "confidence": "Medium"
                 }
-        except:
+        except requests.exceptions.RequestException:
             pass
     return None
 
 
 def check_sql(url):
     payloads = load_payloads()["sqli"]
-
     for payload in payloads:
         try:
             res = requests.get(f"{url}?id={payload}")
@@ -154,7 +174,7 @@ def check_sql(url):
                     "severity": "High",
                     "confidence": "High"
                 }
-        except:
+        except requests.exceptions.RequestException:
             pass
     return None
 
@@ -164,20 +184,15 @@ def check_sql(url):
 # -----------------------------
 def find_links(response, base_url):
     links = []
-
     try:
         soup = BeautifulSoup(response.text, "html.parser")
-
         for tag in soup.find_all("a"):
             href = tag.get("href")
-
             if href and href.startswith("/"):
                 full_url = base_url.rstrip("/") + href
                 links.append(full_url)
-
-    except:
-        pass
-
+    except Exception as e:
+        print(f"[!] Link extraction failed: {e}")
     return list(set(links))[:5]
 
 
@@ -189,17 +204,25 @@ def run_nikto(url):
         res = subprocess.run(
             ["nikto", "-h", url, "-maxtime", "20"],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=60
         )
         return res.stdout
-    except:
+    except FileNotFoundError:
+        print("[-] Nikto is not installed or not on PATH.")
+        return ""
+    except subprocess.TimeoutExpired:
+        print("[!] Nikto scan timed out.")
+        return ""
+    except subprocess.SubprocessError as e:
+        print(f"[-] Nikto failed: {e}")
         return ""
 
 
 def parse_nikto(output):
     findings = []
     for line in output.split("\n"):
-        if "+ " in line:
+        if line.startswith("+ ") and len(line) > 3:
             findings.append({
                 "type": "Nikto Finding",
                 "detail": line.strip(),
@@ -210,24 +233,32 @@ def parse_nikto(output):
 
 
 # -----------------------------
-# Nmap (STABLE VERSION)
+# Nmap
 # -----------------------------
 def run_nmap(host):
     try:
         res = subprocess.run(
             ["nmap", "-F", host],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=60
         )
         return res.stdout
-    except:
+    except FileNotFoundError:
+        print("[-] Nmap is not installed or not on PATH.")
+        return ""
+    except subprocess.TimeoutExpired:
+        print("[!] Nmap scan timed out.")
+        return ""
+    except subprocess.SubprocessError as e:
+        print(f"[-] Nmap failed: {e}")
         return ""
 
 
 def parse_nmap(output):
     findings = []
     for line in output.split("\n"):
-        if "open" in line:
+        if "open" in line and "/tcp" in line:
             findings.append({
                 "type": "Open Port",
                 "detail": line.strip(),
@@ -253,8 +284,8 @@ def overall_risk(v):
 # -----------------------------
 def generate_report(vulns, url, mode, endpoints):
     high = sum(1 for v in vulns if v["severity"] == "High")
-    med = sum(1 for v in vulns if v["severity"] == "Medium")
-    low = sum(1 for v in vulns if v["severity"] == "Low")
+    med  = sum(1 for v in vulns if v["severity"] == "Medium")
+    low  = sum(1 for v in vulns if v["severity"] == "Low")
 
     risk = overall_risk(vulns)
     filename = f"report_{random.randint(1000,9999)}.html"
@@ -265,7 +296,6 @@ def generate_report(vulns, url, mode, endpoints):
 <html>
 <head>
 <title>WebV Report</title>
-
 <style>
 body {{
     font-family: 'Segoe UI', sans-serif;
@@ -273,17 +303,14 @@ body {{
     color: #e2e8f0;
     margin: 0;
 }}
-
 .header {{
     background: #1e293b;
     padding: 20px;
     text-align: center;
 }}
-
 .container {{
     padding: 20px;
 }}
-
 .card {{
     background: #1e293b;
     padding: 15px;
@@ -291,77 +318,57 @@ body {{
     border-radius: 10px;
     box-shadow: 0 4px 10px rgba(0,0,0,0.3);
 }}
-
 .badge {{
     padding: 5px 10px;
     border-radius: 5px;
     font-weight: bold;
 }}
-
 .high {{ background: #ef4444; }}
 .medium {{ background: #f59e0b; }}
 .low {{ background: #22c55e; }}
-
 .summary {{
     display: flex;
     gap: 20px;
 }}
-
 .box {{
     flex: 1;
     padding: 15px;
     border-radius: 10px;
     text-align: center;
 }}
-
 .box.high {{ background: #7f1d1d; }}
 .box.medium {{ background: #78350f; }}
 .box.low {{ background: #14532d; }}
-
-ul {{
-    line-height: 1.8;
-}}
-
+ul {{ line-height: 1.8; }}
 </style>
-
 </head>
-
 <body>
-
 <div class="header">
     <h1>Web Vulnerability Report</h1>
     <p><b>Target:</b> {url}</p>
     <p><b>Scan Mode:</b> {mode}</p>
     <h2>Overall Risk: <span class="badge {risk.lower()}">{risk}</span></h2>
 </div>
-
 <div class="container">
-
 <h2>Summary</h2>
 <div class="summary">
     <div class="box high">High<br>{high}</div>
     <div class="box medium">Medium<br>{med}</div>
     <div class="box low">Low<br>{low}</div>
 </div>
-
 <h2>Discovered Endpoints</h2>
 <div class="card">
 <ul>
 """)
-
         for ep in endpoints:
             f.write(f"<li>{ep}</li>")
-
         f.write("""
 </ul>
 </div>
-
 <h2>Findings</h2>
 """)
-
         for v in vulns:
             info = VULN_INFO.get(v["type"], {})
-
             f.write(f"""
 <div class="card">
     <h3>{v['type']} <span class="badge {v['severity'].lower()}">{v['severity']}</span></h3>
@@ -372,14 +379,14 @@ ul {{
     <p><b>Confidence:</b> {v['confidence']}</p>
 </div>
 """)
-
         f.write("""
 </div>
 </body>
 </html>
 """)
-
     return filename
+
+
 # -----------------------------
 # Scan Logic
 # -----------------------------
@@ -423,7 +430,6 @@ def run_scan(url, fast=False, deep=False):
         for link in links:
             print(f"[+] Scanning endpoint: {link}")
             discovered.append(link)
-
             time.sleep(1)
 
             xss = check_xss(link)
@@ -442,7 +448,6 @@ def run_scan(url, fast=False, deep=False):
 
     else:
         print("[+] Normal mode")
-
         print("[+] Running Nikto...")
         vulns.extend(parse_nikto(run_nikto(url)))
 
@@ -464,7 +469,6 @@ def add_payload(vtype, payload):
 
     data[vtype].append(payload)
     save_payloads(data)
-
     print("[+] Payload added")
 
 
