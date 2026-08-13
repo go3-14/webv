@@ -17,6 +17,21 @@ PAYLOAD_FILE = "payloads.json"
 
 
 # -----------------------------
+# Logging Setup
+# -----------------------------
+def setup_logging(verbose: bool = False):
+    """Configure logging level and format for the entire tool.
+    --verbose enables DEBUG output; default is INFO.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S"
+    )
+
+
+# -----------------------------
 # Payload Handling
 # -----------------------------
 def load_payloads():
@@ -24,10 +39,10 @@ def load_payloads():
         with open(PAYLOAD_FILE, "r") as f:
             return json.load(f)
     except FileNotFoundError:
-        print(f"[!] Payload file '{PAYLOAD_FILE}' not found. Using defaults.")
+        logging.warning(f"Payload file '{PAYLOAD_FILE}' not found. Using defaults.")
         return {"xss": ["<script>alert(1)</script>"], "sqli": ["'"]}
     except json.JSONDecodeError as e:
-        print(f"[!] Payload file is malformed JSON: {e}. Using defaults.")
+        logging.error(f"Payload file is malformed JSON: {e}. Using defaults.")
         return {"xss": ["<script>alert(1)</script>"], "sqli": ["'"]}
 
 
@@ -36,7 +51,7 @@ def save_payloads(data):
         with open(PAYLOAD_FILE, "w") as f:
             json.dump(data, f, indent=4)
     except OSError as e:
-        print(f"[!] Could not save payloads: {e}")
+        logging.error(f"Could not save payloads: {e}")
 
 
 # -----------------------------
@@ -111,11 +126,8 @@ def check_dependencies():
     if not shutil.which("nikto"):
         missing.append("nikto")
     if missing:
-        print("\n[!] Missing tools:")
-        for m in missing:
-            print(f" - {m}")
-        print("\nInstall using:")
-        print("sudo apt install " + " ".join(missing))
+        logging.error("Missing required external tools: " + ", ".join(missing))
+        logging.error("Install using: sudo apt install " + " ".join(missing))
         return False
     return True
 
@@ -127,23 +139,23 @@ def extract_host(url):
 def validate_url(url):
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        print(f"[-] Invalid URL scheme '{parsed.scheme}'. Use http:// or https://")
+        logging.error(f"Invalid URL scheme '{parsed.scheme}'. Use http:// or https://")
         return None
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         return response
     except requests.exceptions.Timeout:
-        print(f"[-] Connection timed out reaching: {url}")
+        logging.error(f"Connection timed out reaching: {url}")
         return None
     except requests.exceptions.ConnectionError:
-        print(f"[-] Cannot connect to: {url}")
+        logging.error(f"Cannot connect to: {url}")
         return None
     except requests.exceptions.HTTPError as e:
-        print(f"[!] HTTP {e.response.status_code} received from {url} — continuing scan.")
+        logging.warning(f"HTTP {e.response.status_code} received from {url} — continuing scan.")
         return e.response
     except requests.exceptions.RequestException as e:
-        print(f"[-] Request failed: {e}")
+        logging.error(f"Request failed: {e}")
         return None
 
 
@@ -209,7 +221,7 @@ def check_cors(url):
                 "confidence": "High"
             }
     except requests.exceptions.RequestException as e:
-        print(f"[!] CORS check failed: {e}")
+        logging.debug(f"CORS check failed: {e}")
     return None
 
 
@@ -298,7 +310,7 @@ def check_ssl(url):
             "confidence": "Medium"
         })
     except (socket.timeout, OSError) as e:
-        print(f"[!] SSL check connection failed for {hostname}: {e}")
+        logging.debug(f"SSL check connection failed for {hostname}: {e}")
 
     return findings
 
@@ -402,13 +414,13 @@ def run_nikto(url):
         )
         return res.stdout
     except FileNotFoundError:
-        print("[-] Nikto is not installed or not on PATH.")
+        logging.error("Nikto is not installed or not on PATH.")
         return ""
     except subprocess.TimeoutExpired:
-        print("[!] Nikto scan timed out.")
+        logging.warning("Nikto scan timed out after 60 seconds.")
         return ""
     except subprocess.SubprocessError as e:
-        print(f"[-] Nikto failed: {e}")
+        logging.error(f"Nikto failed: {e}")
         return ""
 
 
@@ -438,13 +450,13 @@ def run_nmap(host):
         )
         return res.stdout
     except FileNotFoundError:
-        print("[-] Nmap is not installed or not on PATH.")
+        logging.error("Nmap is not installed or not on PATH.")
         return ""
     except subprocess.TimeoutExpired:
-        print("[!] Nmap scan timed out.")
+        logging.warning("Nmap scan timed out after 60 seconds.")
         return ""
     except subprocess.SubprocessError as e:
-        print(f"[-] Nmap failed: {e}")
+        logging.error(f"Nmap failed: {e}")
         return ""
 
 
@@ -601,13 +613,11 @@ code {{ background: #0f172a; padding: 2px 6px; border-radius: 4px; font-size: 0.
 # Scan Logic
 # -----------------------------
 def run_scan(url, fast=False, deep=False):
-    if not check_dependencies():
-        return
-    print(f"[+] Scanning {url}")
+    logging.info(f"Starting scan: {url}")
 
     response = validate_url(url)
     if not response:
-        print("[-] Invalid URL")
+        logging.error("Could not reach target URL. Aborting.")
         return
 
     vulns = []
@@ -621,38 +631,39 @@ def run_scan(url, fast=False, deep=False):
             "confidence": "High"
         })
 
-    # SSL/TLS check
-    print("[+] Checking SSL/TLS configuration...")
+    logging.info("Checking SSL/TLS configuration...")
     vulns.extend(check_ssl(url))
 
-    # CORS check
-    print("[+] Checking CORS configuration...")
+    logging.info("Checking CORS configuration...")
     cors = check_cors(url)
     if cors:
         vulns.append(cors)
 
-    # Open Redirect check
-    print("[+] Checking for open redirect...")
+    logging.info("Checking for open redirect...")
     redirect = check_open_redirect(url)
     if redirect:
         vulns.append(redirect)
 
+    logging.info("Checking for XSS...")
     vulns.extend(check_xss(url))
 
+    logging.info("Checking for SQL injection...")
     sql = check_sql(url)
     if sql:
         vulns.append(sql)
 
     if fast:
-        print("[+] Fast mode → skipping heavy scans")
+        logging.info("Fast mode — skipping external tool scans (Nikto/Nmap).")
 
     elif deep:
-        print("[+] Deep mode → crawling endpoints")
+        logging.info("Deep mode — crawling discovered endpoints...")
+        if not check_dependencies():
+            logging.warning("Missing tools — Nikto/Nmap checks will be skipped.")
 
         links = find_links(response, url)
 
         for link in links:
-            print(f"[+] Scanning endpoint: {link}")
+            logging.info(f"Scanning endpoint: {link}")
             discovered.append(link)
             time.sleep(1)
 
@@ -662,36 +673,42 @@ def run_scan(url, fast=False, deep=False):
             if sql:
                 vulns.append(sql)
 
-        print("[+] Running Nikto...")
+        logging.info("Running Nikto...")
         vulns.extend(parse_nikto(run_nikto(url)))
 
-        print("[+] Running Nmap...")
+        logging.info("Running Nmap...")
         vulns.extend(parse_nmap(run_nmap(extract_host(url))))
 
     else:
-        print("[+] Normal mode")
-        print("[+] Running Nikto...")
-        vulns.extend(parse_nikto(run_nikto(url)))
+        logging.info("Normal mode — running Nikto...")
+        if not check_dependencies():
+            logging.warning("Nikto not found — skipping server scan.")
+        else:
+            vulns.extend(parse_nikto(run_nikto(url)))
 
     mode = "FAST" if fast else "DEEP" if deep else "NORMAL"
     report = generate_report(vulns, url, mode, discovered)
-
-    print(f"[+] Report generated: {report}")
+    logging.info(f"Scan complete. {len(vulns)} finding(s) found.")
+    logging.info(f"Report saved: {report}")
 
 
 # -----------------------------
 # CLI Commands
 # -----------------------------
 def add_payload(vtype, payload):
+    if not vtype or not payload:
+        logging.error("Both --type and --payload are required for the add command.")
+        return
+
     data = load_payloads()
 
     if vtype not in data:
-        print("Use xss or sqli")
+        logging.error(f"Unknown type '{vtype}'. Use 'xss' or 'sqli'.")
         return
 
     data[vtype].append(payload)
     save_payloads(data)
-    print("[+] Payload added")
+    logging.info(f"Payload added to '{vtype}': {payload}")
 
 
 def list_payloads():
@@ -708,25 +725,30 @@ def list_payloads():
 def main():
     print_banner()
 
-    parser = argparse.ArgumentParser(description="Vulnerability Checker CLI")
+    parser = argparse.ArgumentParser(
+        description="webv — Web Vulnerability Scanner",
+        epilog="Example: python main.py scan https://example.com --deep --verbose"
+    )
 
     parser.add_argument("command", help="scan / add / list")
-    parser.add_argument("target", nargs="?", help="Target URL")
-    parser.add_argument("--type", help="xss or sqli")
-    parser.add_argument("--payload", help="Payload to add")
-    parser.add_argument("--fast", action="store_true")
-    parser.add_argument("--deep", action="store_true")
+    parser.add_argument("target", nargs="?", help="Target URL (required for scan)")
+    parser.add_argument("--type",    help="Payload type: xss or sqli (used with add)")
+    parser.add_argument("--payload", help="Payload string to add")
+    parser.add_argument("--fast",    action="store_true", help="Fast mode: skip Nikto/Nmap")
+    parser.add_argument("--deep",    action="store_true", help="Deep mode: crawl + Nikto + Nmap")
+    parser.add_argument("--verbose", action="store_true", help="Enable debug-level logging")
 
     args = parser.parse_args()
+    setup_logging(verbose=args.verbose)
 
     if args.fast and args.deep:
-        print("Choose either --fast or --deep")
-        return
+        logging.error("--fast and --deep are mutually exclusive. Choose one.")
+        sys.exit(1)
 
     if args.command == "scan":
         if not args.target:
-            print("Usage: scan <url>")
-            return
+            logging.error("Usage: python main.py scan <url> [--fast|--deep]")
+            sys.exit(1)
         run_scan(args.target, fast=args.fast, deep=args.deep)
 
     elif args.command == "add":
@@ -736,7 +758,8 @@ def main():
         list_payloads()
 
     else:
-        print("Invalid command")
+        logging.error(f"Unknown command '{args.command}'. Use: scan / add / list")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
