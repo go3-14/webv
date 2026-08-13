@@ -147,33 +147,70 @@ def check_headers(response):
     return issues
 
 
-def check_xss(url):
+def check_xss(url, param="q"):
+    """
+    Check for reflected XSS. Only flags the payload if it appears *unescaped*
+    in the response — avoids false positives where the server correctly
+    HTML-encodes output (e.g. &lt;script&gt; is safe, <script> is not).
+    Returns a list so multiple payloads can be reported.
+    """
     payloads = load_payloads()["xss"]
+    import html as _html
+    results = []
     for payload in payloads:
         try:
-            res = requests.get(f"{url}?q={payload}")
-            if payload in res.text:
-                return {
-                    "detail": f"Payload reflected: {payload}",
+            res = requests.get(url, params={param: payload}, timeout=10)
+            escaped = _html.escape(payload)
+            if payload in res.text and escaped not in res.text:
+                results.append({
+                    "type": "XSS",
+                    "detail": f"Unescaped payload reflected via ?{param}=: {payload}",
                     "severity": "High",
-                    "confidence": "Medium"
-                }
+                    "confidence": "High"
+                })
         except requests.exceptions.RequestException:
             pass
-    return None
+    return results
 
 
-def check_sql(url):
+# Real database error strings — only appear on actual SQL errors,
+# not on any page that happens to mention the word 'sql' or 'error'.
+DB_ERROR_SIGNATURES = [
+    "you have an error in your sql syntax",
+    "warning: mysql_fetch",
+    "warning: mysqli_fetch",
+    "unclosed quotation mark after the character string",
+    "quoted string not properly terminated",
+    "pg_query(): query failed",
+    "sqlstate[42000]",
+    "ora-01756",
+    "microsoft ole db provider for sql server",
+    "sqlite3.operationalerror",
+    "syntax error or access violation",
+    "division by zero in",
+    "supplied argument is not a valid mysql",
+]
+
+
+def check_sql(url, param="id"):
+    """
+    Check for SQL injection using real DB error signatures.
+    Avoids false positives from pages that merely mention 'sql' or 'error'
+    in their content or documentation.
+    """
     payloads = load_payloads()["sqli"]
     for payload in payloads:
         try:
-            res = requests.get(f"{url}?id={payload}")
-            if any(x in res.text.lower() for x in ["sql", "mysql", "error"]):
-                return {
-                    "detail": f"Triggered with payload: {payload}",
-                    "severity": "High",
-                    "confidence": "High"
-                }
+            res = requests.get(url, params={param: payload}, timeout=10)
+            text_lower = res.text.lower()
+            for sig in DB_ERROR_SIGNATURES:
+                if sig in text_lower:
+                    return {
+                        "type": "SQL Injection",
+                        "detail": f"DB error signature '{sig}' triggered via ?{param}= with payload: {payload}",
+                        "severity": "High",
+                        "confidence": "High"
+                    }
         except requests.exceptions.RequestException:
             pass
     return None
@@ -411,13 +448,11 @@ def run_scan(url, fast=False, deep=False):
             "confidence": "High"
         })
 
-    xss = check_xss(url)
-    if xss:
-        vulns.append({"type": "XSS", **xss})
+    vulns.extend(check_xss(url))
 
     sql = check_sql(url)
     if sql:
-        vulns.append({"type": "SQL Injection", **sql})
+        vulns.append(sql)
 
     if fast:
         print("[+] Fast mode → skipping heavy scans")
@@ -432,13 +467,11 @@ def run_scan(url, fast=False, deep=False):
             discovered.append(link)
             time.sleep(1)
 
-            xss = check_xss(link)
-            if xss:
-                vulns.append({"type": "XSS", **xss})
+            vulns.extend(check_xss(link))
 
             sql = check_sql(link)
             if sql:
-                vulns.append({"type": "SQL Injection", **sql})
+                vulns.append(sql)
 
         print("[+] Running Nikto...")
         vulns.extend(parse_nikto(run_nikto(url)))
