@@ -44,30 +44,60 @@ def save_payloads(data):
 # -----------------------------
 VULN_INFO = {
     "XSS": {
-        "description": "Script injection vulnerability.",
-        "risk": "Session hijacking or data theft.",
-        "fix": "Sanitize inputs"
+        "description": "Cross-Site Scripting — attacker-controlled script reflected in the page without sanitization.",
+        "risk": "Session hijacking, credential theft, or malicious redirects affecting site users.",
+        "fix": "HTML-encode all user-supplied input on output. Use a Content Security Policy header."
     },
     "SQL Injection": {
-        "description": "Database query manipulation.",
-        "risk": "Data breach or auth bypass.",
-        "fix": "Use prepared statements"
+        "description": "User input is concatenated into a SQL query without parameterization.",
+        "risk": "Full database compromise, authentication bypass, and potential RCE via xp_cmdshell.",
+        "fix": "Use parameterized queries / prepared statements. Never concatenate user input into SQL."
     },
     "Missing Header": {
-        "description": "Missing security headers.",
-        "risk": "Weak protection.",
-        "fix": "Add HTTP security headers"
+        "description": "One or more recommended HTTP security headers are absent from the response.",
+        "risk": "Increased exposure to clickjacking, MIME sniffing, and cross-site scripting attacks.",
+        "fix": "Add X-Frame-Options, Content-Security-Policy, and X-Content-Type-Options to all responses."
     },
     "Open Port": {
-        "description": "Exposed service.",
-        "risk": "Potential attack surface.",
-        "fix": "Close unused ports"
+        "description": "A network port is open and a service is accepting connections.",
+        "risk": "Exposed services expand the attack surface — especially if unpatched or misconfigured.",
+        "fix": "Close unused ports via firewall rules. Keep all exposed services updated and hardened."
     },
     "Nikto Finding": {
-        "description": "Server misconfiguration.",
-        "risk": "Potential vulnerabilities.",
-        "fix": "Update server"
-    }
+        "description": "Nikto identified a potential server misconfiguration or known vulnerability.",
+        "risk": "Varies by finding — may indicate outdated software, dangerous HTTP methods, or info leakage.",
+        "fix": "Review each Nikto finding individually and update or reconfigure the affected component."
+    },
+    "CORS Misconfiguration": {
+        "description": "Server allows cross-origin requests from untrusted or arbitrary origins.",
+        "risk": "An attacker-controlled site can read authenticated API responses, leading to data theft.",
+        "fix": "Set Access-Control-Allow-Origin to specific trusted domains. Never use wildcard with credentials."
+    },
+    "Open Redirect": {
+        "description": "Application redirects users to externally supplied URLs without validation.",
+        "risk": "Used in phishing attacks — attacker crafts a trusted-looking link redirecting to a malicious site.",
+        "fix": "Validate redirect targets server-side. Use a whitelist of allowed destination URLs."
+    },
+    "No HTTPS": {
+        "description": "Site uses plain HTTP with no TLS encryption.",
+        "risk": "All traffic including credentials and session tokens is transmitted in plaintext.",
+        "fix": "Obtain a TLS certificate (e.g. via Let's Encrypt) and redirect all HTTP traffic to HTTPS."
+    },
+    "SSL Certificate Expiring": {
+        "description": "The TLS certificate is close to its expiry date.",
+        "risk": "Browsers will display security warnings and connections may be refused after expiry.",
+        "fix": "Renew the certificate before it expires. Consider automated renewal with certbot."
+    },
+    "Invalid SSL Certificate": {
+        "description": "The TLS certificate cannot be verified against a trusted Certificate Authority.",
+        "risk": "Enables man-in-the-middle attacks — attackers can intercept and read all traffic.",
+        "fix": "Replace self-signed certificates with ones issued by a trusted CA."
+    },
+    "Weak TLS Cipher": {
+        "description": "The server negotiated a cipher suite with known cryptographic weaknesses.",
+        "risk": "Encrypted traffic may be decryptable by an attacker with sufficient resources.",
+        "fix": "Disable RC4, DES, 3DES, EXPORT, and NULL cipher suites in your server TLS configuration."
+    },
 }
 
 
@@ -141,10 +171,136 @@ def print_banner():
 # -----------------------------
 def check_headers(response):
     issues = []
-    for h in ["X-Frame-Options", "Content-Security-Policy", "X-Content-Type-Options"]:
+    security_headers = [
+        "X-Frame-Options",
+        "Content-Security-Policy",
+        "X-Content-Type-Options",
+        "Strict-Transport-Security",
+        "Referrer-Policy",
+    ]
+    for h in security_headers:
         if h not in response.headers:
             issues.append(h)
     return issues
+
+
+def check_cors(url):
+    """Check for CORS misconfiguration by spoofing the Origin header."""
+    try:
+        res = requests.get(
+            url,
+            headers={"Origin": "https://evil-attacker.com"},
+            timeout=10
+        )
+        acao = res.headers.get("Access-Control-Allow-Origin", "")
+        acac = res.headers.get("Access-Control-Allow-Credentials", "").lower()
+        if acao == "*":
+            return {
+                "type": "CORS Misconfiguration",
+                "detail": "Wildcard Access-Control-Allow-Origin (*) — any site can read responses.",
+                "severity": "Medium",
+                "confidence": "High"
+            }
+        if acao == "https://evil-attacker.com" and acac == "true":
+            return {
+                "type": "CORS Misconfiguration",
+                "detail": "Server reflects arbitrary Origin AND allows credentials — critical CORS bypass.",
+                "severity": "High",
+                "confidence": "High"
+            }
+    except requests.exceptions.RequestException as e:
+        print(f"[!] CORS check failed: {e}")
+    return None
+
+
+def check_open_redirect(url):
+    """Check common redirect parameters for open redirect vulnerabilities."""
+    redirect_params = ["redirect", "url", "next", "return", "goto", "redir", "destination", "target"]
+    test_payload = "https://evil-attacker.com"
+    for param in redirect_params:
+        try:
+            res = requests.get(
+                url,
+                params={param: test_payload},
+                timeout=10,
+                allow_redirects=False
+            )
+            location = res.headers.get("Location", "")
+            if "evil-attacker.com" in location:
+                return {
+                    "type": "Open Redirect",
+                    "detail": f"Server redirects to attacker-controlled URL via ?{param}= parameter.",
+                    "severity": "Medium",
+                    "confidence": "High"
+                }
+        except requests.exceptions.RequestException:
+            pass
+    return None
+
+
+def check_ssl(url):
+    """Check SSL/TLS config — certificate validity, expiry, and cipher strength."""
+    import ssl, socket
+    from datetime import datetime
+    findings = []
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+
+    if parsed.scheme != "https":
+        findings.append({
+            "type": "No HTTPS",
+            "detail": "Site does not use HTTPS — all traffic is transmitted in plaintext.",
+            "severity": "High",
+            "confidence": "High"
+        })
+        return findings
+
+    try:
+        ctx = ssl.create_default_context()
+        with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
+            s.settimeout(10)
+            s.connect((hostname, 443))
+            cert = s.getpeercert()
+            cipher = s.cipher()
+
+            weak_ciphers = ["RC4", "DES", "3DES", "NULL", "EXPORT", "ANON"]
+            if any(w in cipher[0] for w in weak_ciphers):
+                findings.append({
+                    "type": "Weak TLS Cipher",
+                    "detail": f"Negotiated weak cipher suite: {cipher[0]}",
+                    "severity": "High",
+                    "confidence": "High"
+                })
+
+            expiry = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+            days_left = (expiry - datetime.utcnow()).days
+            if days_left < 30:
+                sev = "High" if days_left < 7 else "Medium"
+                findings.append({
+                    "type": "SSL Certificate Expiring",
+                    "detail": f"Certificate expires in {days_left} day(s) on {cert['notAfter']}.",
+                    "severity": sev,
+                    "confidence": "High"
+                })
+
+    except ssl.SSLCertVerificationError:
+        findings.append({
+            "type": "Invalid SSL Certificate",
+            "detail": "Certificate verification failed — may be self-signed or untrusted CA.",
+            "severity": "High",
+            "confidence": "High"
+        })
+    except ssl.SSLError as e:
+        findings.append({
+            "type": "Invalid SSL Certificate",
+            "detail": f"SSL handshake error: {e}",
+            "severity": "Medium",
+            "confidence": "Medium"
+        })
+    except (socket.timeout, OSError) as e:
+        print(f"[!] SSL check connection failed for {hostname}: {e}")
+
+    return findings
 
 
 def check_xss(url, param="q"):
@@ -464,6 +620,22 @@ def run_scan(url, fast=False, deep=False):
             "severity": "Low",
             "confidence": "High"
         })
+
+    # SSL/TLS check
+    print("[+] Checking SSL/TLS configuration...")
+    vulns.extend(check_ssl(url))
+
+    # CORS check
+    print("[+] Checking CORS configuration...")
+    cors = check_cors(url)
+    if cors:
+        vulns.append(cors)
+
+    # Open Redirect check
+    print("[+] Checking for open redirect...")
+    redirect = check_open_redirect(url)
+    if redirect:
+        vulns.append(redirect)
 
     vulns.extend(check_xss(url))
 
