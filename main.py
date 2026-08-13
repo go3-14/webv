@@ -320,19 +320,23 @@ def overall_risk(v):
 # Report
 # -----------------------------
 def generate_report(vulns, url, mode, endpoints):
+    import html as _html
     high = sum(1 for v in vulns if v["severity"] == "High")
     med  = sum(1 for v in vulns if v["severity"] == "Medium")
     low  = sum(1 for v in vulns if v["severity"] == "Low")
 
     risk = overall_risk(vulns)
-    filename = f"report_{random.randint(1000,9999)}.html"
+    # Use a timestamp instead of random int — unique, sortable, human-readable
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"report_{timestamp}.html"
 
-    with open(filename, "w") as f:
-        f.write(f"""
-<!DOCTYPE html>
-<html>
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"""<!DOCTYPE html>
+<html lang="en">
 <head>
-<title>WebV Report</title>
+<meta charset="UTF-8">
+<title>WebV Report — {_html.escape(url)}</title>
 <style>
 body {{
     font-family: 'Segoe UI', sans-serif;
@@ -344,9 +348,12 @@ body {{
     background: #1e293b;
     padding: 20px;
     text-align: center;
+    border-bottom: 2px solid #334155;
 }}
 .container {{
     padding: 20px;
+    max-width: 960px;
+    margin: 0 auto;
 }}
 .card {{
     background: #1e293b;
@@ -354,37 +361,47 @@ body {{
     margin: 15px 0;
     border-radius: 10px;
     box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    border-left: 4px solid #475569;
 }}
+.card.high   {{ border-left-color: #ef4444; }}
+.card.medium {{ border-left-color: #f59e0b; }}
+.card.low    {{ border-left-color: #22c55e; }}
 .badge {{
-    padding: 5px 10px;
+    padding: 3px 10px;
     border-radius: 5px;
     font-weight: bold;
+    font-size: 0.85em;
 }}
-.high {{ background: #ef4444; }}
-.medium {{ background: #f59e0b; }}
-.low {{ background: #22c55e; }}
+.high   {{ background: #ef4444; }}
+.medium {{ background: #f59e0b; color: #000; }}
+.low    {{ background: #22c55e; color: #000; }}
 .summary {{
     display: flex;
     gap: 20px;
+    margin-bottom: 20px;
 }}
 .box {{
     flex: 1;
-    padding: 15px;
+    padding: 20px;
     border-radius: 10px;
     text-align: center;
+    font-size: 1.4em;
+    font-weight: bold;
 }}
-.box.high {{ background: #7f1d1d; }}
+.box.high   {{ background: #7f1d1d; }}
 .box.medium {{ background: #78350f; }}
-.box.low {{ background: #14532d; }}
+.box.low    {{ background: #14532d; }}
 ul {{ line-height: 1.8; }}
+code {{ background: #0f172a; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }}
 </style>
 </head>
 <body>
 <div class="header">
-    <h1>Web Vulnerability Report</h1>
-    <p><b>Target:</b> {url}</p>
-    <p><b>Scan Mode:</b> {mode}</p>
-    <h2>Overall Risk: <span class="badge {risk.lower()}">{risk}</span></h2>
+    <h1>&#128269; Web Vulnerability Report</h1>
+    <p><b>Target:</b> <code>{_html.escape(url)}</code></p>
+    <p><b>Scan Mode:</b> {_html.escape(mode)}</p>
+    <p><b>Generated:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+    <h2>Overall Risk: <span class="badge {risk.lower()}">{_html.escape(risk)}</span></h2>
 </div>
 <div class="container">
 <h2>Summary</h2>
@@ -393,34 +410,34 @@ ul {{ line-height: 1.8; }}
     <div class="box medium">Medium<br>{med}</div>
     <div class="box low">Low<br>{low}</div>
 </div>
-<h2>Discovered Endpoints</h2>
-<div class="card">
-<ul>
 """)
-        for ep in endpoints:
-            f.write(f"<li>{ep}</li>")
-        f.write("""
-</ul>
+        if endpoints:
+            f.write("<h2>Discovered Endpoints</h2>\n<div class=\"card\">\n<ul>\n")
+            for ep in endpoints:
+                # html.escape prevents injected URLs from breaking the report
+                f.write(f"<li><code>{_html.escape(ep)}</code></li>\n")
+            f.write("</ul>\n</div>\n")
+
+        f.write("<h2>Findings</h2>\n")
+        if not vulns:
+            f.write("<div class=\"card\"><p>&#10003; No vulnerabilities detected.</p></div>\n")
+        else:
+            for v in vulns:
+                info = VULN_INFO.get(v["type"], {})
+                sev_class = v["severity"].lower()
+                # Every dynamic value is escaped — prevents XSS in the report itself
+                f.write(f"""
+<div class="card {sev_class}">
+    <h3>{_html.escape(v['type'])} <span class="badge {sev_class}">{_html.escape(v['severity'])}</span></h3>
+    <p><b>Details:</b> {_html.escape(v['detail'])}</p>
+    <p><b>Description:</b> {_html.escape(info.get('description', 'N/A'))}</p>
+    <p><b>Risk:</b> {_html.escape(info.get('risk', 'N/A'))}</p>
+    <p><b>Fix:</b> {_html.escape(info.get('fix', 'N/A'))}</p>
+    <p><b>Confidence:</b> {_html.escape(v.get('confidence', 'N/A'))}</p>
 </div>
-<h2>Findings</h2>
 """)
-        for v in vulns:
-            info = VULN_INFO.get(v["type"], {})
-            f.write(f"""
-<div class="card">
-    <h3>{v['type']} <span class="badge {v['severity'].lower()}">{v['severity']}</span></h3>
-    <p><b>Details:</b> {v['detail']}</p>
-    <p><b>Description:</b> {info.get('description','N/A')}</p>
-    <p><b>Risk:</b> {info.get('risk','N/A')}</p>
-    <p><b>Fix:</b> {info.get('fix','N/A')}</p>
-    <p><b>Confidence:</b> {v['confidence']}</p>
-</div>
-""")
-        f.write("""
-</div>
-</body>
-</html>
-""")
+
+        f.write("</div>\n</body>\n</html>\n")
     return filename
 
 
