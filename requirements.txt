@@ -1,2 +1,6 @@
-requests
+httpx
 beautifulsoup4
+jinja2
+
+# Optional, only used in --deep mode if installed (JS-rendered crawling):
+# playwright
