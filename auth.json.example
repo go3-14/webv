@@ -1,0 +1,8 @@
+{
+    "login_url": "http://localhost:3000/rest/user/login",
+    "username_field": "email",
+    "password_field": "password",
+    "username": "test@example.com",
+    "password": "test1234",
+    "success_indicator": "authentication"
+}
