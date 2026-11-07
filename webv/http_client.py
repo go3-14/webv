@@ -89,11 +89,11 @@ class WebvClient:
                 time.sleep(wait)
             self._last_request_time = time.monotonic()
 
-    def request(self, method: str, url: str, capture: bool = False, **kwargs):
+    def request(self, method: str, url: str, capture: bool = False, follow_redirects: bool = True, **kwargs):
         self._throttle()
         try:
             req = self.client.build_request(method, url, **kwargs)
-            res = self.client.send(req)
+            res = self.client.send(req, follow_redirects=follow_redirects)
             transcript = Transcript(req, res) if capture else None
             return res, transcript
         except httpx.RequestError as e:
